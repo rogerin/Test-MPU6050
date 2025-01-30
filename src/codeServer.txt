@@ -1,0 +1,133 @@
+#include <WiFi.h>
+#include <WebSocketsServer.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+
+const char* ssid = "Cariri";       // Coloque o nome do seu Wi-Fi
+const char* password = "0987654321";  // Coloque a senha do seu Wi-Fi
+
+WiFiServer server(80);
+WebSocketsServer webSocket = WebSocketsServer(81);
+Adafruit_MPU6050 mpu;
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
+
+
+const char html_page[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MPU6050 - Gráfico de Rotação</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { text-align: center; font-family: Arial, sans-serif; }
+        canvas { max-width: 600px; margin: 20px auto; }
+        .seta { font-size: 80px; display: inline-block; transition: transform 0.1s; }
+    </style>
+</head>
+<body>
+    <h1>Gráfico de Rotação</h1>
+    <canvas id="grafico"></canvas>
+    <h2>Rotação</h2>
+    <div class="seta" id="seta">⬆️</div>
+
+    <script>
+        var socket = new WebSocket("ws://" + window.location.hostname + ":81/");
+        var ctx = document.getElementById('grafico').getContext('2d');
+        var chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: Array(50).fill(''),
+                datasets: [{
+                    label: 'Rotação Z (°/s)',
+                    borderColor: 'blue',
+                    backgroundColor: 'rgba(0, 0, 255, 0.2)',
+                    data: Array(50).fill(0),
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                scales: { y: { beginAtZero: false } }
+            }
+        });
+
+        socket.onmessage = function(event) {
+            var giroZ = parseFloat(event.data);
+            chart.data.labels.push('');
+            chart.data.datasets[0].data.push(giroZ);
+            if (chart.data.labels.length > 50) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+            }
+            chart.update();
+
+            var seta = document.getElementById("seta");
+            seta.style.transform = "rotate(" + (giroZ * 5) + "deg)";
+        };
+    </script>
+</body>
+</html>
+)rawliteral";
+
+
+void setup() {
+    Serial.begin(9600);
+    Wire.begin(21, 22);  // Configura I2C no ESP32 (SDA, SCL)
+
+    // Conectar ao Wi-Fi
+    Serial.print("Conectando ao WiFi...");
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi conectado!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+
+    // Iniciar servidor web e WebSockets
+    server.begin();
+    webSocket.begin();
+    webSocket.onEvent(webSocketEvent);
+
+    // Inicializar MPU6050
+    if (!mpu.begin()) {
+        Serial.println("MPU6050 não encontrado!");
+        while (1);
+    }
+}
+
+void loop() {
+    webSocket.loop();
+    WiFiClient client = server.available();
+
+    if (client) {
+        String req = client.readStringUntil('\r');
+        client.flush();
+
+        Serial.println("Cliente conectado, enviando página...");
+
+        client.print("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n");
+        client.print(html_page);
+        client.stop();
+    }
+
+    // Capturar dados do giroscópio
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+    float giroZ = g.gyro.z;  // Captura o valor do giroscópio no eixo Z
+
+    // Enviar dados via WebSocket
+    String message = String(giroZ);
+    webSocket.broadcastTXT(message);
+
+    delay(100);
+}
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+    if (type == WStype_TEXT) {
+        Serial.println((char*)payload);
+    }
+}
